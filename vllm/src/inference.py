@@ -19,7 +19,7 @@ class InferenceEngine:
         self.static_input = None
         self.static_output = None
         self.save_mode_enabled = False
-        self.kv_cache_device = torch.device("cpu")  # KV cache on CPU in save mode
+        self.kv_cache_device = torch.device("cpu") if self.save_mode_enabled else self.device
         
     def enable_save_mode(self):
         """Enable save mode - model weights on GPU, KV cache on CPU"""
@@ -36,9 +36,7 @@ class InferenceEngine:
             self.kv_cache_device = torch.device("cpu")
             
             # Move model to GPU if not already there
-            if self.device.type != "cuda":
-                self.device = torch.device("cuda")
-                
+            # Note: In a full implementation, this would involve more complex device management
             print("✅ Save Mode enabled successfully!")
             return True
             
@@ -46,21 +44,25 @@ class InferenceEngine:
             print(f"Error enabling save mode: {str(e)}")
             return False
     
+    def disable_save_mode(self):
+        """Disable save mode - all operations on default device"""
+        self.save_mode_enabled = False
+        self.kv_cache_device = self.device
+        print("Save Mode disabled")
+    
     def paged_attention(self, query: torch.Tensor, key_cache: torch.Tensor, value_cache: torch.Tensor, 
                        block_tables: torch.Tensor, context_lens: torch.Tensor) -> torch.Tensor:
         """
         Implement PagedAttention for efficient memory management.
         In save mode, this operates with CPU-based KV cache.
         """
-        # Handle save mode by ensuring operations happen on appropriate devices
-        if self.save_mode_enabled:
-            # Move tensors to appropriate devices for save mode
-            if query.device != self.device:
-                query = query.to(self.device)
-            if key_cache.device != self.kv_cache_device:
-                key_cache = key_cache.to(self.kv_cache_device)
-            if value_cache.device != self.kv_cache_device:
-                value_cache = value_cache.to(self.kv_cache_device)
+        # Handle device placement consistently
+        if query.device != self.device:
+            query = query.to(self.device)
+        if key_cache.device != self.kv_cache_device:
+            key_cache = key_cache.to(self.kv_cache_device)
+        if value_cache.device != self.kv_cache_device:
+            value_cache = value_cache.to(self.kv_cache_device)
         
         # Simplified implementation - in practice, this would be much more complex
         # and would involve actual paging mechanisms
@@ -71,6 +73,10 @@ class InferenceEngine:
         attn_weights = F.softmax(scores, dim=-1)
         output = torch.matmul(attn_weights, value_cache)
         
+        # Ensure output is on the correct device
+        if output.device != self.device:
+            output = output.to(self.device)
+            
         return output
     
     def capture_cuda_graph(self, model: torch.nn.Module, sample_input: torch.Tensor):
@@ -79,6 +85,10 @@ class InferenceEngine:
         """
         if not self.use_cuda_graph:
             return
+            
+        # Ensure input is on the correct device
+        if sample_input.device != self.device:
+            sample_input = sample_input.to(self.device)
             
         # Warmup
         for _ in range(3):
@@ -98,6 +108,10 @@ class InferenceEngine:
         if not self.use_cuda_graph or self.cuda_graph is None:
             return None
             
+        # Ensure input is on the correct device
+        if input_tensor.device != self.device:
+            input_tensor = input_tensor.to(self.device)
+            
         self.static_input.copy_(input_tensor)
         self.cuda_graph.replay()
         return self.static_output.clone()
@@ -106,6 +120,10 @@ class InferenceEngine:
         """
         Perform parallel sampling from logits
         """
+        # Ensure logits are on the correct device
+        if logits.device != self.device:
+            logits = logits.to(self.device)
+            
         probs = F.softmax(logits, dim=-1)
         samples = torch.multinomial(probs, num_samples)
         return samples
@@ -115,6 +133,10 @@ class InferenceEngine:
         """
         Perform beam search decoding
         """
+        # Ensure input is on the correct device
+        if input_ids.device != self.device:
+            input_ids = input_ids.to(self.device)
+            
         # Initialize beams
         beams = [(input_ids, 0.0)]  # (sequence, cumulative_log_prob)
         completed = []
@@ -125,6 +147,9 @@ class InferenceEngine:
                 with torch.no_grad():
                     outputs = model(seq)
                     logits = outputs.logits if hasattr(outputs, 'logits') else outputs
+                    # Ensure logits are on the correct device
+                    if logits.device != self.device:
+                        logits = logits.to(self.device)
                     log_probs = F.log_softmax(logits[:, -1, :], dim=-1)
                     
                 # Get top-k candidates

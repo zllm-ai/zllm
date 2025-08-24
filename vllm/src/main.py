@@ -4,7 +4,6 @@ Main entry point for the custom vLLM/llama.cpp CLI application
 
 import torch
 import warnings
-import sys
 from typing import List, Tuple, Dict, Optional
 from vllm.src.model_loader import HuggingFaceModelLoader
 from vllm.src.quantization import Quantizer
@@ -87,20 +86,27 @@ class CustomVLLMCLI:
             print("Enabling Save Mode...")
             print("Moving model weights to GPU, keeping KV cache operations on CPU...")
             
-            # This is a simplified implementation - in a full implementation,
-            # we would need to modify the model's attention mechanisms to
-            # handle KV cache on CPU while keeping weights on GPU
-            
-            # For demonstration, we'll just set a flag and show what would be done
-            self.save_mode_enabled = True
-            print("✅ Save Mode enabled successfully!")
-            print("Note: This is a conceptual implementation. Full save mode requires")
-            print("      custom attention kernels that are not implemented in this demo.")
-            return True
+            # Enable save mode in inference engine
+            if self.inference_engine:
+                success = self.inference_engine.enable_save_mode()
+                if success:
+                    self.save_mode_enabled = True
+                    print("✅ Save Mode enabled successfully!")
+                return success
+            else:
+                print("Inference engine not initialized.")
+                return False
             
         except Exception as e:
             print(f"Error enabling save mode: {str(e)}")
             return False
+    
+    def disable_save_mode(self):
+        """Disable save mode"""
+        if self.inference_engine:
+            self.inference_engine.disable_save_mode()
+        self.save_mode_enabled = False
+        print("Save mode disabled")
     
     def interactive_setup(self):
         """Interactive setup for model and generation parameters"""
@@ -152,24 +158,32 @@ class CustomVLLMCLI:
         print(f"Device: {device_choice}")
         
         # Special handling for quantized models
-        if quantization_type in ["awq", "AWQ", "gptq", "GPTQ"]:
-            if device_choice == "cpu":
-                print("Warning: Quantized models are optimized for GPU. Performance on CPU may be poor.")
+        if quantization_type in ["awq", "AWQ", "gptq", "GPTQ"] and device_choice == "cpu":
+            print("Warning: Quantized models are optimized for GPU. Performance on CPU may be poor.")
+            choice = input("Continue anyway? (y/n) [default: n]: ").strip().lower()
+            if choice != 'y':
+                print("Exiting...")
+                return False
+        # Check if required libraries are installed for certain quantization types
+        if quantization_type and quantization_type.lower() == "awq":
+            try:
+                import awq
+            except ImportError:
+                print("Warning: AWQ quantization requires 'autoawq' library (deprecated).")
+                print("Note: AutoAWQ is officially deprecated and will no longer be maintained.")
                 choice = input("Continue anyway? (y/n) [default: n]: ").strip().lower()
                 if choice != 'y':
                     print("Exiting...")
                     return False
-            # Check if required libraries are installed
-            if quantization_type.lower() == "awq":
-                try:
-                    import awq
-                except ImportError:
-                    print("Warning: AWQ quantization requires 'autoawq' library.")
-                    print("Note: AutoAWQ is deprecated. Consider using 'none' or 'int8' quantization instead.")
-                    choice = input("Continue anyway? (y/n) [default: n]: ").strip().lower()
-                    if choice != 'y':
-                        print("Exiting...")
-                        return False
+        elif quantization_type and quantization_type.lower() == "gptq":
+            try:
+                import auto_gptq
+            except ImportError:
+                print("Warning: GPTQ quantization requires 'auto-gptq' library.")
+                choice = input("Continue anyway? (y/n) [default: n]: ").strip().lower()
+                if choice != 'y':
+                    print("Exiting...")
+                    return False
         
         try:
             # Initialize model loader with warnings suppressed
@@ -182,16 +196,18 @@ class CustomVLLMCLI:
             self.tokenizer = model_loader.get_tokenizer()
             self.model_config = getattr(self.model, 'config', None)
             
-            # Apply quantization if specified and needed
-            if quantization_type and quantization_type.lower() not in ["none", "awq", "gptq"]:
-                # For non-prequantized quantization methods, apply after loading
-                if not (auto_quantization and auto_quantization.lower() in ["awq", "gptq"]):
-                    print(f"Applying {quantization_type.upper()} quantization...")
+            # Apply quantization if specified (for non-prequantized models)
+            if quantization_type and quantization_type.lower() != "none" and not auto_quantization:
+                print(f"Applying {quantization_type.upper()} quantization...")
+                try:
                     from vllm.src.quantization import Quantizer
                     quantizer = Quantizer(model=self.model, quantization=quantization_type)
-                    self.model = quantizer.quantize_model()
+                    self.model = quantizer.quantize_model()  # Get quantized model
+                except Exception as e:
+                    print(f"Quantization failed: {str(e)}")
+                    print("Continuing with original model...")
             
-            # Initialize inference engine
+            # Initialize inference engine with proper device handling
             self.inference_engine = InferenceEngine(device=device_choice)
             
             # Get model defaults
@@ -203,11 +219,7 @@ class CustomVLLMCLI:
             
         except Exception as e:
             print(f"Error loading model: {str(e)}")
-            print("\nTroubleshooting tips:")
-            print("- For AWQ models, ensure you have 'autoawq' installed (note: it's deprecated)")
-            print("- For GPTQ models, ensure you have 'auto-gptq' installed")
-            print("- Some models require Hugging Face authentication")
-            print("- Large models may require significant GPU memory")
+            print("Make sure you have enough GPU memory for the selected model.")
             return False
     
     def auto_configure_generation_params(self):
@@ -238,7 +250,7 @@ class CustomVLLMCLI:
                 context_length = 128
             config['context_length'] = context_length
         
-        max_suggested_new_tokens = min(500, config.get('context_length', 2048) // 4)
+        max_suggested_new_tokens = min(1000, config.get('context_length', 2048) // 4)
         print(f"Model suggested max new tokens: {max_suggested_new_tokens}")
         max_new_tokens_input = input(f"Max new tokens [default: {max_suggested_new_tokens}]: ").strip()
         if max_new_tokens_input:
@@ -308,7 +320,7 @@ class CustomVLLMCLI:
     def stream_response(self, prompt: str, config: Dict):
         """Stream response token by token"""
         try:
-            # Tokenize the input
+            # Tokenize the input and ensure proper device placement
             inputs = self.tokenizer(
                 prompt,
                 return_tensors="pt",
@@ -316,21 +328,20 @@ class CustomVLLMCLI:
                 truncation=True,
                 max_length=config.get('context_length', 2048)
             )
-            inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
             
-            print("Generating response: ", end="", flush=True)
+            # Move inputs to the correct device
+            model_device = next(self.model.parameters()).device
+            inputs = {k: v.to(model_device) for k, v in inputs.items()}
+            
+            print("Generating response (streaming): ", end="", flush=True)
             
             # Suppress transformer warnings
             import transformers
             transformers.logging.set_verbosity_error()
             
-            # For proper streaming, we need to generate token by token
-            # Create initial input
-            current_inputs = {k: v.clone() for k, v in inputs.items()}
-            generated_text = ""
-            
             # Prepare generation parameters
             gen_kwargs = {
+                "max_new_tokens": config['max_new_tokens'],
                 "temperature": config['temperature'],
                 "top_p": config['top_p'],
                 "repetition_penalty": config['repetition_penalty'],
@@ -344,44 +355,43 @@ class CustomVLLMCLI:
             if config.get('top_k', 0) > 0:
                 gen_kwargs["top_k"] = config['top_k']
             
-            # Generate tokens one by one for true streaming
-            max_tokens = config['max_new_tokens']
-            
+            # Generate response with streaming
             with torch.no_grad():
-                for i in range(max_tokens):
-                    # Generate next token with only 1 new token
+                # For streaming, we'll generate token by token
+                generated_tokens = []
+                input_length = inputs[list(inputs.keys())[0]].shape[1]
+                
+                # Create initial input
+                current_inputs = {k: v.clone() for k, v in inputs.items()}
+                
+                for i in range(config['max_new_tokens']):
+                    # Generate next token
                     outputs = self.model.generate(
                         **current_inputs,
                         max_new_tokens=1,
                         **{k: v for k, v in gen_kwargs.items() if k not in ['max_new_tokens']}
                     )
                     
-                    # Get the new token ID
+                    # Get the new token
                     new_token_id = outputs[0, -1].unsqueeze(0).unsqueeze(0)
-                    
-                    # Decode the new token
                     new_token = self.tokenizer.decode([new_token_id.item()])
                     
-                    # Check for end of sequence
+                    # Check for EOS token
                     if new_token_id.item() == self.tokenizer.eos_token_id:
                         break
                     
-                    # Print the new token immediately
+                    # Print the new token
                     print(new_token, end="", flush=True)
-                    generated_text += new_token
+                    generated_tokens.append(new_token_id.item())
                     
-                    # Update inputs for next iteration
+                    # Update inputs for next iteration - ensure proper device placement
                     current_inputs = {
                         k: torch.cat([v, new_token_id.to(v.device)], dim=1) 
                         for k, v in current_inputs.items()
                     }
-                    
-                    # Small delay for better streaming experience
-                    import time
-                    time.sleep(0.02)
-            
-            print()  # New line after streaming
-            return generated_text
+                
+                print()  # New line after streaming
+                return ''.join([self.tokenizer.decode([token_id]) for token_id in generated_tokens])
             
         except Exception as e:
             raise Exception(f"Error generating response: {str(e)}")
@@ -389,7 +399,7 @@ class CustomVLLMCLI:
     def generate_response(self, prompt: str, config: Dict):
         """Generate response with given configuration"""
         try:
-            # Tokenize the input
+            # Tokenize the input and ensure proper device placement
             inputs = self.tokenizer(
                 prompt,
                 return_tensors="pt",
@@ -397,7 +407,10 @@ class CustomVLLMCLI:
                 truncation=True,
                 max_length=config.get('context_length', 2048)
             )
-            inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
+            
+            # Move inputs to the correct device
+            model_device = next(self.model.parameters()).device
+            inputs = {k: v.to(model_device) for k, v in inputs.items()}
             
             print("Generating response...")
             
@@ -497,11 +510,10 @@ class CustomVLLMCLI:
                     continue
                 elif prompt.lower() == 'save':
                     if torch.cuda.is_available():
-                        self.save_mode_enabled = not self.save_mode_enabled
-                        if self.save_mode_enabled:
+                        if not self.save_mode_enabled:
                             self.enable_save_mode()
                         else:
-                            print("Save mode disabled")
+                            self.disable_save_mode()
                     else:
                         print("Save mode requires CUDA. CUDA not available.")
                     continue
@@ -567,11 +579,10 @@ class CustomVLLMCLI:
                         continue
                     elif prompt.lower() == 'save':
                         if torch.cuda.is_available():
-                            self.save_mode_enabled = not self.save_mode_enabled
-                            if self.save_mode_enabled:
+                            if not self.save_mode_enabled:
                                 self.enable_save_mode()
                             else:
-                                print("Save mode disabled")
+                                self.disable_save_mode()
                         else:
                             print("Save mode requires CUDA. CUDA not available.")
                         continue

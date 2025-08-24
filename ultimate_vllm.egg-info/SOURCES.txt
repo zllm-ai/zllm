@@ -8,11 +8,15 @@ ultimate_vllm.egg-info/requires.txt
 ultimate_vllm.egg-info/top_level.txt
 vllm/__init__.py
 vllm/src/__init__.py
+vllm/src/advanced_inference.py
+vllm/src/advanced_model_loader.py
+vllm/src/advanced_quantization.py
 vllm/src/api_server.py
 vllm/src/batcher.py
 vllm/src/enhanced_cli.py
 vllm/src/inference.py
 vllm/src/main.py
+vllm/src/main_advanced.py
 vllm/src/model_loader.py
 vllm/src/quantization.py
 vllm/src/ultimate_cli.py

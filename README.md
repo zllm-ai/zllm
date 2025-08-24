@@ -1,6 +1,6 @@
 # Ultimate Custom vLLM Implementation
 
-This implementation combines the best features of both vLLM and llama.cpp with additional enhancements for a superior user experience.
+A professional implementation that combines the best features of both vLLM and llama.cpp with additional enhancements for a superior user experience.
 
 ## Features
 
@@ -31,8 +31,7 @@ This implementation combines the best features of both vLLM and llama.cpp with a
 - ✅ CPU-first optimization
 
 ### Additional Custom Features:
-- ✅ Intelligent automatic configuration based on model defaults
-- ✅ Interactive configuration wizard when customization is needed
+- ✅ Interactive configuration wizard
 - ✅ Plugin system for custom extensions
 - ✅ Advanced model management
 - ✅ Performance monitoring and profiling
@@ -58,7 +57,7 @@ pip install -e .
 
 ### Command Line Interface
 
-#### Smart Setup Mode (Recommended)
+#### Smart Setup Mode
 ```bash
 custom_vllm
 ```

@@ -15,9 +15,8 @@ setup(
     ],
     entry_points={
         "console_scripts": [
-            "ultimate_vllm=vllm.src.ultimate_cli:main",
             "custom_vllm=vllm.src.main:main",
-            "enhanced_vllm=vllm.src.enhanced_cli:main",
+            "custom_vllm_advanced=vllm.src.main_advanced:main",
             "custom_vllm_server=vllm.src.api_server:app"
         ]
     }
