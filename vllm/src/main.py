@@ -108,13 +108,35 @@ class CustomVLLMCLI:
         print("=" * 45)
         
         # Model configuration
-        model_name = input("Enter Hugging Face model name (e.g., gpt2, Qwen/Qwen3-0.5B) [default: gpt2]: ").strip()
+        model_name = input("Enter Hugging Face model name (e.g., gpt2, microsoft/Phi-3-mini-4k-instruct) [default: gpt2]: ").strip()
         if not model_name:
             model_name = "gpt2"
         
-        quantization_type = input("Choose quantization type (gptq/awq/none) [default: none]: ").strip()
-        if not quantization_type:
-            quantization_type = None
+        # Auto-detect quantization type from model name
+        auto_quantization = None
+        if "awq" in model_name.lower():
+            auto_quantization = "awq"
+        elif "gptq" in model_name.lower():
+            auto_quantization = "gptq"
+        
+        if auto_quantization:
+            print(f"Detected {auto_quantization.upper()} quantized model")
+            quantization_type = auto_quantization
+        else:
+            print("Available quantization methods:")
+            print("  none  - No quantization (default)")
+            print("  awq   - Activation-aware Weight Quantization")
+            print("  gptq  - Post-training Quantization")
+            print("  int8  - 8-bit integer quantization")
+            print("  int4  - 4-bit integer quantization")
+            print("  fp8   - 8-bit floating point")
+            print("  fp4   - 4-bit floating point")
+            print("  nf4   - NormalFloat 4-bit")
+            print("  fp16  - 16-bit floating point")
+            
+            quantization_type = input("Choose quantization type [default: none]: ").strip()
+            if not quantization_type:
+                quantization_type = None
         
         device_choice = "cuda" if torch.cuda.is_available() else "cpu"
         if torch.cuda.is_available():
@@ -129,13 +151,25 @@ class CustomVLLMCLI:
         print(f"Quantization: {quantization_type}")
         print(f"Device: {device_choice}")
         
-        # Special handling for AWQ models on CPU
-        if quantization_type in ["awq", "AWQ"] and device_choice == "cpu":
-            print("Warning: AWQ models are optimized for GPU. Performance on CPU may be poor.")
-            choice = input("Continue anyway? (y/n) [default: n]: ").strip().lower()
-            if choice != 'y':
-                print("Exiting...")
-                return False
+        # Special handling for quantized models
+        if quantization_type in ["awq", "AWQ", "gptq", "GPTQ"]:
+            if device_choice == "cpu":
+                print("Warning: Quantized models are optimized for GPU. Performance on CPU may be poor.")
+                choice = input("Continue anyway? (y/n) [default: n]: ").strip().lower()
+                if choice != 'y':
+                    print("Exiting...")
+                    return False
+            # Check if required libraries are installed
+            if quantization_type.lower() == "awq":
+                try:
+                    import awq
+                except ImportError:
+                    print("Warning: AWQ quantization requires 'autoawq' library.")
+                    print("Note: AutoAWQ is deprecated. Consider using 'none' or 'int8' quantization instead.")
+                    choice = input("Continue anyway? (y/n) [default: n]: ").strip().lower()
+                    if choice != 'y':
+                        print("Exiting...")
+                        return False
         
         try:
             # Initialize model loader with warnings suppressed
@@ -148,11 +182,14 @@ class CustomVLLMCLI:
             self.tokenizer = model_loader.get_tokenizer()
             self.model_config = getattr(self.model, 'config', None)
             
-            # Apply quantization if specified
-            if quantization_type and quantization_type.lower() != "none":
-                print(f"Applying {quantization_type.upper()} quantization...")
-                quantizer = Quantizer(model=self.model, quantization=quantization_type)
-                self.model = quantizer.model  # Get quantized model
+            # Apply quantization if specified and needed
+            if quantization_type and quantization_type.lower() not in ["none", "awq", "gptq"]:
+                # For non-prequantized quantization methods, apply after loading
+                if not (auto_quantization and auto_quantization.lower() in ["awq", "gptq"]):
+                    print(f"Applying {quantization_type.upper()} quantization...")
+                    from vllm.src.quantization import Quantizer
+                    quantizer = Quantizer(model=self.model, quantization=quantization_type)
+                    self.model = quantizer.quantize_model()
             
             # Initialize inference engine
             self.inference_engine = InferenceEngine(device=device_choice)
@@ -166,7 +203,11 @@ class CustomVLLMCLI:
             
         except Exception as e:
             print(f"Error loading model: {str(e)}")
-            print("Make sure you have enough GPU memory for the selected model.")
+            print("\nTroubleshooting tips:")
+            print("- For AWQ models, ensure you have 'autoawq' installed (note: it's deprecated)")
+            print("- For GPTQ models, ensure you have 'auto-gptq' installed")
+            print("- Some models require Hugging Face authentication")
+            print("- Large models may require significant GPU memory")
             return False
     
     def auto_configure_generation_params(self):
