@@ -1,0 +1,4 @@
+[console_scripts]
+custom_vllm = vllm.src.main:main
+custom_vllm_server = vllm.src.api_server:app
+enhanced_vllm = vllm.src.enhanced_cli:main
