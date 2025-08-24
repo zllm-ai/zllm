@@ -31,7 +31,8 @@ This implementation combines the best features of both vLLM and llama.cpp with a
 - ✅ CPU-first optimization
 
 ### Additional Custom Features:
-- ✅ Interactive configuration wizard
+- ✅ Intelligent automatic configuration based on model defaults
+- ✅ Interactive configuration wizard when customization is needed
 - ✅ Plugin system for custom extensions
 - ✅ Advanced model management
 - ✅ Performance monitoring and profiling
@@ -57,31 +58,24 @@ pip install -e .
 
 ### Command Line Interface
 
+#### Smart Setup Mode (Recommended)
+```bash
+custom_vllm
+```
+This mode automatically detects and uses model-specific defaults, only prompting for customization when explicitly requested.
+
 #### Quick Start Mode
 ```bash
 custom_vllm
 ```
-This will launch the CLI with default settings for quick experimentation.
+Select option 2 for quick experimentation with default settings.
 
-#### Advanced Setup Mode
-```bash
-custom_vllm
-```
-Select option 1 for full customization:
-- Choose any Hugging Face model
-- Configure quantization (GPTQ, AWQ, or none)
-- Select device (CUDA or CPU)
-- Customize all generation parameters
-
-#### Full Parameter Customization
-In advanced mode, you can configure:
-- **max_new_tokens**: Maximum number of tokens to generate
-- **temperature**: Sampling temperature (0.0-2.0)
-- **top_p**: Nucleus sampling parameter
-- **top_k**: Top-k sampling parameter
-- **repetition_penalty**: Penalty for repeated tokens
-- **context_length**: Maximum context length
-- And more...
+#### Intelligent Parameter Management
+The system automatically:
+- Detects model-specific context lengths and token limits
+- Uses model's default generation parameters (temperature, top-p, etc.)
+- Validates parameter ranges to prevent memory issues
+- Only prompts for customization when explicitly requested
 
 ### API Server
 
@@ -94,9 +88,9 @@ The server will be available at `http://localhost:8000`
 
 #### API Endpoints
 
-- `GET /v1/health` - Health check
+- `GET /v1/health` - Health check with model defaults
 - `GET /v1/models` - List available models
-- `POST /v1/models/load` - Load a specific model
+- `POST /v1/models/load` - Load a specific model with automatic configuration
 - `POST /v1/config/generation` - Configure generation parameters
 - `GET /v1/config` - Get current generation configuration
 - `POST /v1/completions` - Text completion (OpenAI compatible)
@@ -107,40 +101,46 @@ The server will be available at `http://localhost:8000`
 ```python
 import requests
 
-# Configure generation parameters
-config = {
-    "max_new_tokens": 300,
-    "temperature": 0.7,
-    "top_p": 0.9
-}
-requests.post("http://localhost:8000/v1/config/generation", json=config)
+# Load a model (automatically configured)
+response = requests.post("http://localhost:8000/v1/models/load", json={
+    "model": "gpt2"
+})
+print(response.json())
 
-# Generate completion
+# Generate completion with automatic defaults
+response = requests.post("http://localhost:8000/v1/completions", json={
+    "model": "gpt2",
+    "prompt": "The future of AI is"
+})
+print(response.json())
+
+# Customize only specific parameters
 response = requests.post("http://localhost:8000/v1/completions", json={
     "model": "gpt2",
     "prompt": "The future of AI is",
-    "max_tokens": 100,
-    "temperature": 0.7
+    "temperature": 0.7,
+    "max_tokens": 100
 })
 print(response.json())
 ```
 
 ## Customization Options
 
-### Model Loading
-- Support for any Hugging Face model
-- Quantization options: GPTQ, AWQ, or none
-- Device selection: CUDA (GPU) or CPU
-- Automatic device detection
+### Automatic Configuration
+- **Smart Defaults**: Automatically detects and uses model-specific parameters
+- **Context Length**: Auto-detects maximum context length from model config
+- **Generation Parameters**: Uses model's default temperature, top-p, etc.
+- **Hardware Optimization**: Automatically selects best parameters for CPU/GPU
 
-### Generation Parameters
-- **Temperature**: Controls randomness (0.0 = deterministic, 1.0 = original, >1.0 = more random)
-- **Top-p (Nucleus)**: Cumulative probability threshold for token selection
-- **Top-k**: Limits token selection to top k tokens
-- **Repetition Penalty**: Discourages repeating tokens
-- **Max New Tokens**: Maximum number of tokens to generate
-- **Context Length**: Maximum input context length
-- **Early Stopping**: Stop generation when EOS token is reached
+### Manual Customization (When Needed)
+When explicit customization is required, you can configure:
+- **max_new_tokens**: Maximum number of tokens to generate
+- **temperature**: Sampling temperature (0.0-2.0)
+- **top_p**: Nucleus sampling parameter
+- **top_k**: Top-k sampling parameter
+- **repetition_penalty**: Penalty for repeated tokens
+- **context_length**: Maximum context length
+- And more...
 
 ### Advanced Features
 - **KV Cache Management**: Automatic memory management for attention keys/values
@@ -153,8 +153,8 @@ print(response.json())
 
 1. **For GPU Systems**:
    - Use quantized models (AWQ/GPTQ) for better memory efficiency
-   - Increase context length for longer inputs
-   - Use lower temperatures for more deterministic outputs
+   - Trust automatic context length detection
+   - Use model defaults for optimal performance
 
 2. **For CPU Systems**:
    - Use smaller models (gpt2, Qwen/Qwen3-0.5B)

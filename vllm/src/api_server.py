@@ -13,6 +13,7 @@ import uvicorn
 import asyncio
 import uuid
 import time
+import warnings
 from vllm.src.model_loader import HuggingFaceModelLoader
 from vllm.src.quantization import Quantizer
 from vllm.src.inference import InferenceEngine
@@ -24,33 +25,64 @@ app = FastAPI(title="Custom vLLM API", description="OpenAI-compatible API for cu
 model = None
 tokenizer = None
 inference_engine = None
+model_config = None
 
-# Default generation configuration
+# Default generation configuration (will be updated when model is loaded)
 default_generation_config = {
     "max_new_tokens": 200,
-    "temperature": 0.7,
-    "top_p": 0.9,
-    "top_k": 50,
-    "repetition_penalty": 1.1,
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "top_k": 0,
+    "repetition_penalty": 1.0,
     "do_sample": True,
-    "early_stopping": True,
+    "early_stopping": False,
 }
+
+def get_model_defaults(model_obj):
+    """Extract default parameters from the loaded model"""
+    defaults = {
+        "max_new_tokens": 200,
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": 0,
+        "repetition_penalty": 1.0,
+        "do_sample": True,
+        "early_stopping": False,
+    }
+    
+    try:
+        # Try to get model-specific defaults
+        if hasattr(model_obj, 'config'):
+            config = model_obj.config
+            
+            # Get generation defaults from model config
+            if hasattr(config, 'temperature'):
+                defaults['temperature'] = config.temperature
+            if hasattr(config, 'top_p'):
+                defaults['top_p'] = config.top_p
+            if hasattr(config, 'repetition_penalty'):
+                defaults['repetition_penalty'] = config.repetition_penalty
+                
+    except Exception as e:
+        print(f"Could not extract model defaults: {e}")
+        
+    return defaults
 
 class CompletionRequest(BaseModel):
     model: str
     prompt: str
-    max_tokens: Optional[int] = 16
-    temperature: Optional[float] = 1.0
-    top_p: Optional[float] = 1.0
-    top_k: Optional[int] = 0
+    max_tokens: Optional[int] = None
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    top_k: Optional[int] = None
     n: Optional[int] = 1
     stream: Optional[bool] = False
     logprobs: Optional[int] = None
     echo: Optional[bool] = False
     stop: Optional[List[str]] = None
-    presence_penalty: Optional[float] = 0.0
-    frequency_penalty: Optional[float] = 0.0
-    best_of: Optional[int] = 1
+    presence_penalty: Optional[float] = None
+    frequency_penalty: Optional[float] = None
+    best_of: Optional[int] = None
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
 
@@ -75,15 +107,15 @@ class ChatMessage(BaseModel):
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[ChatMessage]
-    temperature: Optional[float] = 1.0
-    top_p: Optional[float] = 1.0
-    top_k: Optional[int] = 0
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    top_k: Optional[int] = None
     n: Optional[int] = 1
     stream: Optional[bool] = False
     stop: Optional[List[str]] = None
-    max_tokens: Optional[int] = 16
-    presence_penalty: Optional[float] = 0.0
-    frequency_penalty: Optional[float] = 0.0
+    max_tokens: Optional[int] = None
+    presence_penalty: Optional[float] = None
+    frequency_penalty: Optional[float] = None
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
 
@@ -117,7 +149,7 @@ class GenerationConfigRequest(BaseModel):
 @app.on_event("startup")
 async def startup_event():
     """Initialize model on startup with default settings"""
-    global model, tokenizer, inference_engine
+    global model, tokenizer, inference_engine, model_config, default_generation_config
     
     # For demonstration, we'll use a small model
     # In practice, you would load the model specified in the request
@@ -125,18 +157,23 @@ async def startup_event():
         model_loader = HuggingFaceModelLoader("gpt2")
         model = model_loader.get_model()
         tokenizer = model_loader.get_tokenizer()
+        model_config = getattr(model, 'config', None)
         
         # Initialize inference engine
         inference_engine = InferenceEngine()
         
-        print("Model loaded successfully")
+        # Get model defaults
+        default_generation_config = get_model_defaults(model)
+        
+        print("Model loaded successfully with automatic configuration")
+        print(f"Model defaults: {default_generation_config}")
     except Exception as e:
         print(f"Error loading model: {str(e)}")
 
 @app.post("/v1/models/load")
 async def load_model(config: ModelConfigRequest):
     """Load a specific model with configuration"""
-    global model, tokenizer, inference_engine
+    global model, tokenizer, inference_engine, model_config, default_generation_config
     
     try:
         model_loader = HuggingFaceModelLoader(
@@ -146,11 +183,15 @@ async def load_model(config: ModelConfigRequest):
         )
         model = model_loader.get_model()
         tokenizer = model_loader.get_tokenizer()
+        model_config = getattr(model, 'config', None)
         
         # Initialize inference engine
         inference_engine = InferenceEngine(device=config.device or "cuda")
         
-        return {"status": "success", "message": f"Model {config.model} loaded successfully"}
+        # Get model defaults
+        default_generation_config = get_model_defaults(model)
+        
+        return {"status": "success", "message": f"Model {config.model} loaded successfully", "defaults": default_generation_config}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error loading model: {str(e)}")
 
@@ -182,7 +223,7 @@ async def list_models():
 @app.post("/v1/completions", response_model=CompletionResponse)
 async def create_completion(request: CompletionRequest):
     """Create a completion for the provided prompt"""
-    global model, tokenizer
+    global model, tokenizer, default_generation_config
     
     if model is None or tokenizer is None:
         raise HTTPException(status_code=500, detail="Model not loaded")
@@ -198,18 +239,20 @@ async def create_completion(request: CompletionRequest):
         )
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
         
-        # Prepare generation parameters
+        # Prepare generation parameters using model defaults, overridden by request parameters
         gen_config = default_generation_config.copy()
-        gen_config.update({
-            "max_new_tokens": request.max_tokens or gen_config["max_new_tokens"],
-            "temperature": request.temperature,
-            "top_p": request.top_p,
-            "repetition_penalty": 1.0 + request.presence_penalty,  # Approximation
-        })
         
-        # Add top_k if specified
-        if request.top_k and request.top_k > 0:
+        # Override with request parameters if provided
+        if request.max_tokens is not None:
+            gen_config["max_new_tokens"] = request.max_tokens
+        if request.temperature is not None:
+            gen_config["temperature"] = request.temperature
+        if request.top_p is not None:
+            gen_config["top_p"] = request.top_p
+        if request.top_k is not None:
             gen_config["top_k"] = request.top_k
+        if request.presence_penalty is not None:
+            gen_config["repetition_penalty"] = 1.0 + request.presence_penalty  # Approximation
         
         # Prepare generation kwargs
         gen_kwargs = {
@@ -218,14 +261,27 @@ async def create_completion(request: CompletionRequest):
             "top_p": gen_config["top_p"],
             "repetition_penalty": gen_config["repetition_penalty"],
             "do_sample": gen_config["do_sample"],
-            "early_stopping": gen_config["early_stopping"],
             "pad_token_id": tokenizer.pad_token_id or tokenizer.eos_token_id,
             "eos_token_id": tokenizer.eos_token_id,
         }
         
-        # Add top_k if specified
-        if gen_config.get("top_k") and gen_config["top_k"] > 0:
+        # Add top_k if specified and > 0
+        if gen_config.get("top_k", 0) > 0:
             gen_kwargs["top_k"] = gen_config["top_k"]
+        
+        # Only add early_stopping if the model supports it and it's enabled
+        if gen_config.get('early_stopping', False):
+            try:
+                # Test if early_stopping is supported
+                dummy_inputs = {k: v[:1] for k, v in inputs.items()}  # Create minimal inputs
+                model.generate(**dummy_inputs, **gen_kwargs, early_stopping=True, max_new_tokens=1)
+                gen_kwargs["early_stopping"] = True
+            except Exception:
+                # early_stopping not supported, continue without it
+                pass
+        
+        # Suppress transformer warnings
+        warnings.filterwarnings("ignore")
         
         # Generate response
         with torch.no_grad():
@@ -261,7 +317,7 @@ async def create_completion(request: CompletionRequest):
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def create_chat_completion(request: ChatCompletionRequest):
     """Create a chat completion for the provided messages"""
-    global model, tokenizer
+    global model, tokenizer, default_generation_config
     
     if model is None or tokenizer is None:
         raise HTTPException(status_code=500, detail="Model not loaded")
@@ -281,18 +337,20 @@ async def create_chat_completion(request: ChatCompletionRequest):
         )
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
         
-        # Prepare generation parameters
+        # Prepare generation parameters using model defaults, overridden by request parameters
         gen_config = default_generation_config.copy()
-        gen_config.update({
-            "max_new_tokens": request.max_tokens or gen_config["max_new_tokens"],
-            "temperature": request.temperature,
-            "top_p": request.top_p,
-            "repetition_penalty": 1.0 + request.presence_penalty,  # Approximation
-        })
         
-        # Add top_k if specified
-        if request.top_k and request.top_k > 0:
+        # Override with request parameters if provided
+        if request.max_tokens is not None:
+            gen_config["max_new_tokens"] = request.max_tokens
+        if request.temperature is not None:
+            gen_config["temperature"] = request.temperature
+        if request.top_p is not None:
+            gen_config["top_p"] = request.top_p
+        if request.top_k is not None:
             gen_config["top_k"] = request.top_k
+        if request.presence_penalty is not None:
+            gen_config["repetition_penalty"] = 1.0 + request.presence_penalty  # Approximation
         
         # Prepare generation kwargs
         gen_kwargs = {
@@ -301,14 +359,27 @@ async def create_chat_completion(request: ChatCompletionRequest):
             "top_p": gen_config["top_p"],
             "repetition_penalty": gen_config["repetition_penalty"],
             "do_sample": gen_config["do_sample"],
-            "early_stopping": gen_config["early_stopping"],
             "pad_token_id": tokenizer.pad_token_id or tokenizer.eos_token_id,
             "eos_token_id": tokenizer.eos_token_id,
         }
         
-        # Add top_k if specified
-        if gen_config.get("top_k") and gen_config["top_k"] > 0:
+        # Add top_k if specified and > 0
+        if gen_config.get("top_k", 0) > 0:
             gen_kwargs["top_k"] = gen_config["top_k"]
+        
+        # Only add early_stopping if the model supports it and it's enabled
+        if gen_config.get('early_stopping', False):
+            try:
+                # Test if early_stopping is supported
+                dummy_inputs = {k: v[:1] for k, v in inputs.items()}  # Create minimal inputs
+                model.generate(**dummy_inputs, **gen_kwargs, early_stopping=True, max_new_tokens=1)
+                gen_kwargs["early_stopping"] = True
+            except Exception:
+                # early_stopping not supported, continue without it
+                pass
+        
+        # Suppress transformer warnings
+        warnings.filterwarnings("ignore")
         
         # Generate response
         with torch.no_grad():
@@ -341,7 +412,7 @@ async def create_chat_completion(request: ChatCompletionRequest):
 @app.get("/v1/health")
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy", "model_loaded": model is not None}
+    return {"status": "healthy", "model_loaded": model is not None, "model_defaults": default_generation_config}
 
 @app.get("/v1/config")
 async def get_config():
