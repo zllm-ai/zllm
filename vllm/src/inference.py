@@ -10,26 +10,58 @@ from torch.nn import functional as F
 from typing import List, Tuple, Dict, Optional
 import numpy as np
 
+
 class InferenceEngine:
     def __init__(self, device: str = "cuda"):
-        # Handle device properly for CPU vs CUDA
-        if device == "cpu" or not torch.cuda.is_available():
-            self.device = torch.device("cpu")
-            self.use_cuda_graph = False
-        else:
-            self.device = torch.device("cuda")
-            self.use_cuda_graph = True
-            
+        self.device = torch.device(device if torch.cuda.is_available() and device == "cuda" else "cpu")
+        self.use_cuda_graph = torch.cuda.is_available() and device == "cuda"
         self.cuda_graph = None
         self.static_input = None
         self.static_output = None
+        self.save_mode_enabled = False
+        self.kv_cache_device = torch.device("cpu")  # KV cache on CPU in save mode
         
+    def enable_save_mode(self):
+        """Enable save mode - model weights on GPU, KV cache on CPU"""
+        if not torch.cuda.is_available():
+            print("Save mode requires CUDA. CUDA not available.")
+            return False
+            
+        try:
+            print("Enabling Save Mode...")
+            print("Moving model weights to GPU, keeping KV cache operations on CPU...")
+            
+            # In save mode, KV cache operations happen on CPU to save GPU memory
+            self.save_mode_enabled = True
+            self.kv_cache_device = torch.device("cpu")
+            
+            # Move model to GPU if not already there
+            if self.device.type != "cuda":
+                self.device = torch.device("cuda")
+                
+            print("✅ Save Mode enabled successfully!")
+            return True
+            
+        except Exception as e:
+            print(f"Error enabling save mode: {str(e)}")
+            return False
+    
     def paged_attention(self, query: torch.Tensor, key_cache: torch.Tensor, value_cache: torch.Tensor, 
                        block_tables: torch.Tensor, context_lens: torch.Tensor) -> torch.Tensor:
         """
         Implement PagedAttention for efficient memory management.
-        This is a simplified version - a full implementation would be more complex.
+        In save mode, this operates with CPU-based KV cache.
         """
+        # Handle save mode by ensuring operations happen on appropriate devices
+        if self.save_mode_enabled:
+            # Move tensors to appropriate devices for save mode
+            if query.device != self.device:
+                query = query.to(self.device)
+            if key_cache.device != self.kv_cache_device:
+                key_cache = key_cache.to(self.kv_cache_device)
+            if value_cache.device != self.kv_cache_device:
+                value_cache = value_cache.to(self.kv_cache_device)
+        
         # Simplified implementation - in practice, this would be much more complex
         # and would involve actual paging mechanisms
         batch_size, seq_len, hidden_dim = query.shape

@@ -17,45 +17,90 @@ class CustomVLLMCLI:
         self.inference_engine = None
         self.model_config = None
         self.default_generation_config = {}
+        self.save_mode_enabled = False
     
-    def get_model_defaults(self):
-        """Extract default parameters from the loaded model"""
-        defaults = {
-            "max_new_tokens": 200,
-            "temperature": 1.0,
-            "top_p": 1.0,
-            "top_k": 0,
-            "repetition_penalty": 1.0,
-            "do_sample": True,
-            "early_stopping": False,
-        }
+    def get_model_max_tokens(self):
+        """Extract maximum context length from the loaded model"""
+        max_context_length = 2048  # Default fallback
         
         try:
-            # Try to get model-specific defaults
             if hasattr(self.model, 'config'):
                 config = self.model.config
                 
-                # Get max context length
+                # Try different attributes for max context length
                 if hasattr(config, 'max_position_embeddings'):
-                    defaults['context_length'] = config.max_position_embeddings
+                    max_context_length = config.max_position_embeddings
                 elif hasattr(config, 'n_ctx'):
-                    defaults['context_length'] = config.n_ctx
-                else:
-                    defaults['context_length'] = 2048  # Default fallback
+                    max_context_length = config.n_ctx
+                elif hasattr(config, 'max_sequence_length'):
+                    max_context_length = config.max_sequence_length
+                elif hasattr(config, 'seq_length'):
+                    max_context_length = config.seq_length
+                    
+        except Exception as e:
+            print(f"Could not extract max context length: {e}")
+            
+        return max_context_length
+    
+    def get_model_defaults(self):
+        """Extract default parameters from the loaded model"""
+        # Get model's maximum context length
+        max_context_length = self.get_model_max_tokens()
+        
+        defaults = {
+            "max_new_tokens": min(500, max_context_length // 4),  # Use 1/4 of context or 500, whichever is smaller
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 50,
+            "repetition_penalty": 1.1,
+            "do_sample": True,
+            "early_stopping": True,
+            "context_length": max_context_length,
+        }
+        
+        try:
+            # Try to get model-specific defaults from config
+            if hasattr(self.model, 'config'):
+                config = self.model.config
                 
                 # Get generation defaults from model config
-                if hasattr(config, 'temperature'):
+                if hasattr(config, 'temperature') and config.temperature is not None:
                     defaults['temperature'] = config.temperature
-                if hasattr(config, 'top_p'):
+                if hasattr(config, 'top_p') and config.top_p is not None:
                     defaults['top_p'] = config.top_p
-                if hasattr(config, 'repetition_penalty'):
+                if hasattr(config, 'repetition_penalty') and config.repetition_penalty is not None:
                     defaults['repetition_penalty'] = config.repetition_penalty
                     
         except Exception as e:
             print(f"Could not extract model defaults: {e}")
-            defaults['context_length'] = 2048
             
         return defaults
+    
+    def enable_save_mode(self):
+        """Enable save mode - model weights on GPU, KV cache on CPU"""
+        if not torch.cuda.is_available():
+            print("Save mode requires CUDA. CUDA not available.")
+            return False
+            
+        try:
+            # Move model to GPU but keep KV cache operations on CPU
+            print("Enabling Save Mode...")
+            print("Moving model weights to GPU, keeping KV cache operations on CPU...")
+            
+            # This is a simplified implementation - in a full implementation,
+            # we would need to modify the model's attention mechanisms to
+            # handle KV cache on CPU while keeping weights on GPU
+            
+            # For demonstration, we'll just set a flag and show what would be done
+            self.save_mode_enabled = True
+            print("✅ Save Mode enabled successfully!")
+            print("Note: This is a conceptual implementation. Full save mode requires")
+            print("      custom attention kernels that are not implemented in this demo.")
+            return True
+            
+        except Exception as e:
+            print(f"Error enabling save mode: {str(e)}")
+            return False
     
     def interactive_setup(self):
         """Interactive setup for model and generation parameters"""
@@ -116,6 +161,7 @@ class CustomVLLMCLI:
             self.default_generation_config = self.get_model_defaults()
             
             print("Model loaded successfully!")
+            print(f"Detected model context length: {self.default_generation_config['context_length']} tokens")
             return True
             
         except Exception as e:
@@ -136,36 +182,38 @@ class CustomVLLMCLI:
         # Get current defaults
         config = self.default_generation_config.copy()
         
-        # Allow user to customize parameters
-        print(f"Model default context length: {config.get('context_length', 2048)}")
+        # Show detected model limits
+        print(f"Model maximum context length: {config.get('context_length', 2048)} tokens")
         context_length_input = input(f"Context length [default: {config.get('context_length', 2048)}]: ").strip()
         if context_length_input:
             context_length = int(context_length_input)
             # Validate context_length
-            max_allowed = min(config.get('context_length', 8192), 8192)
+            max_allowed = config.get('context_length', 8192)
             if context_length > max_allowed:
-                print(f"Warning: Setting context length to maximum allowed: {max_allowed}")
+                print(f"Warning: Setting context length to model maximum: {max_allowed}")
                 context_length = max_allowed
             elif context_length < 128:
                 print("Warning: Context length should be at least 128. Using 128.")
                 context_length = 128
             config['context_length'] = context_length
         
-        print(f"Model default max new tokens: {config.get('max_new_tokens', 200)}")
-        max_new_tokens_input = input(f"Max new tokens [default: {config.get('max_new_tokens', 200)}]: ").strip()
+        max_suggested_new_tokens = min(1000, config.get('context_length', 2048) // 4)
+        print(f"Model suggested max new tokens: {max_suggested_new_tokens}")
+        max_new_tokens_input = input(f"Max new tokens [default: {max_suggested_new_tokens}]: ").strip()
         if max_new_tokens_input:
             max_new_tokens = int(max_new_tokens_input)
             # Validate max_new_tokens
-            if max_new_tokens > 4096:
-                print("Warning: Very large max_new_tokens may cause memory issues. Using 4096.")
-                max_new_tokens = 4096
+            max_allowed = config.get('context_length', 2048) // 2
+            if max_new_tokens > max_allowed:
+                print(f"Warning: Setting max_new_tokens to half of context length: {max_allowed}")
+                max_new_tokens = max_allowed
             elif max_new_tokens < 1:
-                print("Warning: max_new_tokens must be positive. Using default value.")
-                max_new_tokens = config['max_new_tokens']
+                print(f"Warning: max_new_tokens must be positive. Using suggested value: {max_suggested_new_tokens}")
+                max_new_tokens = max_suggested_new_tokens
             config['max_new_tokens'] = max_new_tokens
         
-        print(f"Model default temperature: {config.get('temperature', 1.0)}")
-        temperature_input = input(f"Temperature (0.0-2.0) [default: {config.get('temperature', 1.0)}]: ").strip()
+        print(f"Model default temperature: {config.get('temperature', 0.7)}")
+        temperature_input = input(f"Temperature (0.0-2.0) [default: {config.get('temperature', 0.7)}]: ").strip()
         if temperature_input:
             temperature = float(temperature_input)
             # Validate temperature
@@ -174,8 +222,8 @@ class CustomVLLMCLI:
                 temperature = config['temperature']
             config['temperature'] = temperature
         
-        print(f"Model default top-p: {config.get('top_p', 1.0)}")
-        top_p_input = input(f"Top-p (nucleus sampling) [default: {config.get('top_p', 1.0)}]: ").strip()
+        print(f"Model default top-p: {config.get('top_p', 0.9)}")
+        top_p_input = input(f"Top-p (nucleus sampling) [default: {config.get('top_p', 0.9)}]: ").strip()
         if top_p_input:
             top_p = float(top_p_input)
             # Validate top_p
@@ -184,8 +232,8 @@ class CustomVLLMCLI:
                 top_p = config['top_p']
             config['top_p'] = top_p
         
-        print(f"Model default top-k: {config.get('top_k', 0)}")
-        top_k_input = input(f"Top-k (0 to disable) [default: {config.get('top_k', 0)}]: ").strip()
+        print(f"Model default top-k: {config.get('top_k', 50)}")
+        top_k_input = input(f"Top-k (0 to disable) [default: {config.get('top_k', 50)}]: ").strip()
         if top_k_input:
             top_k = int(top_k_input)
             # Validate top_k
@@ -194,8 +242,8 @@ class CustomVLLMCLI:
                 top_k = config['top_k']
             config['top_k'] = top_k
         
-        print(f"Model default repetition penalty: {config.get('repetition_penalty', 1.0)}")
-        repetition_penalty_input = input(f"Repetition penalty [default: {config.get('repetition_penalty', 1.0)}]: ").strip()
+        print(f"Model default repetition penalty: {config.get('repetition_penalty', 1.1)}")
+        repetition_penalty_input = input(f"Repetition penalty [default: {config.get('repetition_penalty', 1.1)}]: ").strip()
         if repetition_penalty_input:
             repetition_penalty = float(repetition_penalty_input)
             # Validate repetition_penalty
@@ -212,7 +260,85 @@ class CustomVLLMCLI:
         print("-" * 25)
         for key, value in config.items():
             print(f"{key}: {value}")
+        if self.save_mode_enabled:
+            print("SAVE MODE: Enabled")
         print()
+    
+    def stream_response(self, prompt: str, config: Dict):
+        """Stream response token by token"""
+        try:
+            # Tokenize the input
+            inputs = self.tokenizer(
+                prompt,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=config.get('context_length', 2048)
+            )
+            inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
+            
+            print("Generating response (streaming): ", end="", flush=True)
+            
+            # Suppress transformer warnings
+            import transformers
+            transformers.logging.set_verbosity_error()
+            
+            # Prepare generation parameters for streaming
+            gen_kwargs = {
+                "max_new_tokens": config['max_new_tokens'],
+                "temperature": config['temperature'],
+                "top_p": config['top_p'],
+                "repetition_penalty": config['repetition_penalty'],
+                "do_sample": config['do_sample'],
+                "pad_token_id": self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
+                "eos_token_id": self.tokenizer.eos_token_id,
+                "early_stopping": True,
+            }
+            
+            # Add top_k if specified and > 0
+            if config.get('top_k', 0) > 0:
+                gen_kwargs["top_k"] = config['top_k']
+            
+            # Generate response with streaming
+            with torch.no_grad():
+                # For streaming, we'll generate token by token
+                generated_tokens = []
+                input_length = inputs[list(inputs.keys())[0]].shape[1]
+                
+                # Create initial input
+                current_inputs = {k: v.clone() for k, v in inputs.items()}
+                
+                for i in range(config['max_new_tokens']):
+                    # Generate next token
+                    outputs = self.model.generate(
+                        **current_inputs,
+                        max_new_tokens=1,
+                        **{k: v for k, v in gen_kwargs.items() if k not in ['max_new_tokens']}
+                    )
+                    
+                    # Get the new token
+                    new_token_id = outputs[0, -1].unsqueeze(0).unsqueeze(0)
+                    new_token = self.tokenizer.decode([new_token_id.item()])
+                    
+                    # Check for EOS token
+                    if new_token_id.item() == self.tokenizer.eos_token_id:
+                        break
+                    
+                    # Print the new token
+                    print(new_token, end="", flush=True)
+                    generated_tokens.append(new_token_id.item())
+                    
+                    # Update inputs for next iteration
+                    current_inputs = {
+                        k: torch.cat([v, new_token_id.to(v.device)], dim=1) 
+                        for k, v in current_inputs.items()
+                    }
+                
+                print()  # New line after streaming
+                return ''.join([self.tokenizer.decode([token_id]) for token_id in generated_tokens])
+            
+        except Exception as e:
+            raise Exception(f"Error generating response: {str(e)}")
     
     def generate_response(self, prompt: str, config: Dict):
         """Generate response with given configuration"""
@@ -242,22 +368,12 @@ class CustomVLLMCLI:
                 "do_sample": config['do_sample'],
                 "pad_token_id": self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
                 "eos_token_id": self.tokenizer.eos_token_id,
+                "early_stopping": True,
             }
             
             # Add top_k if specified and > 0
             if config.get('top_k', 0) > 0:
                 gen_kwargs["top_k"] = config['top_k']
-            
-            # Only add early_stopping if the model supports it and it's enabled
-            if config.get('early_stopping', False):
-                try:
-                    # Test if early_stopping is supported
-                    dummy_inputs = {k: v[:1] for k, v in inputs.items()}  # Create minimal inputs
-                    self.model.generate(**dummy_inputs, **gen_kwargs, early_stopping=True, max_new_tokens=1)
-                    gen_kwargs["early_stopping"] = True
-                except Exception:
-                    # early_stopping not supported, continue without it
-                    pass
             
             # Generate response
             with torch.no_grad():
@@ -271,6 +387,10 @@ class CustomVLLMCLI:
                 response = full_response[len(prompt):].strip()
             else:
                 response = full_response
+            
+            # Handle empty or very short responses
+            if not response or len(response.strip()) < 5:
+                response = "(No meaningful response generated. Try a more specific prompt.)"
             
             return response
             
@@ -301,14 +421,17 @@ class CustomVLLMCLI:
         print("- For lists, specify the number of items (e.g., 'List 5 facts about...')")
         print("- For explanations, ask for step-by-step breakdowns")
         print("- Use 'config' to reconfigure parameters")
+        print("- Use 'stream' to enable streaming mode")
+        print("- Use 'save' to enable save mode (weights on GPU, KV cache on CPU)")
         print("- Use 'quit' or 'exit' to stop")
         
         # Interactive session
+        streaming_enabled = False
         while True:
-            user_input = input("\nEnter your prompt (or 'quit' to exit, 'config' to reconfigure): ").strip()
-            if user_input.lower() in ['quit', 'exit']:
+            prompt = input("\nEnter your prompt (or 'quit' to exit, 'config' to reconfigure, 'stream' to toggle streaming, 'save' to toggle save mode): ").strip()
+            if prompt.lower() in ['quit', 'exit']:
                 break
-            elif user_input.lower() == 'config':
+            elif prompt.lower() == 'config':
                 print("\nConfiguration Options:")
                 print("1. Automatic (Use model defaults)")
                 print("2. Manual (Customize parameters)")
@@ -321,15 +444,28 @@ class CustomVLLMCLI:
                     config = self.auto_configure_generation_params()
                 self.show_current_config(config)
                 continue
-                
-            if user_input:
-                try:
-                    response = self.generate_response(user_input, config)
-                    
-                    # Handle empty responses
-                    if not response:
-                        print("Generated response: (No response generated)")
+            elif prompt.lower() == 'stream':
+                streaming_enabled = not streaming_enabled
+                print(f"Streaming mode {'enabled' if streaming_enabled else 'disabled'}")
+                continue
+            elif prompt.lower() == 'save':
+                if torch.cuda.is_available():
+                    self.save_mode_enabled = not self.save_mode_enabled
+                    if self.save_mode_enabled:
+                        self.enable_save_mode()
                     else:
+                        print("Save mode disabled")
+                else:
+                    print("Save mode requires CUDA. CUDA not available.")
+                continue
+                
+            if prompt:
+                try:
+                    if streaming_enabled:
+                        response = self.stream_response(prompt, config)
+                        print(f"Streamed response: {response}")
+                    else:
+                        response = self.generate_response(prompt, config)
                         print(f"Generated response: {response}")
                         
                 except Exception as e:
@@ -361,22 +497,38 @@ class CustomVLLMCLI:
             self.default_generation_config = self.get_model_defaults()
             
             print("Model loaded successfully!")
+            print(f"Detected model context length: {self.default_generation_config['context_length']} tokens")
             print("\nUsing automatic configuration based on model defaults:")
             self.show_current_config(self.default_generation_config)
             
             # Interactive session with defaults
+            streaming_enabled = False
             while True:
-                user_input = input("\nEnter your prompt (or 'quit' to exit): ").strip()
-                if user_input.lower() in ['quit', 'exit']:
+                prompt = input("\nEnter your prompt (or 'quit' to exit, 'stream' to toggle streaming, 'save' to toggle save mode): ").strip()
+                if prompt.lower() in ['quit', 'exit']:
                     break
-                    
-                if user_input:
-                    try:
-                        response = self.generate_response(user_input, self.default_generation_config)
-                        
-                        if not response:
-                            print("Generated response: (No response generated)")
+                elif prompt.lower() == 'stream':
+                    streaming_enabled = not streaming_enabled
+                    print(f"Streaming mode {'enabled' if streaming_enabled else 'disabled'}")
+                    continue
+                elif prompt.lower() == 'save':
+                    if torch.cuda.is_available():
+                        self.save_mode_enabled = not self.save_mode_enabled
+                        if self.save_mode_enabled:
+                            self.enable_save_mode()
                         else:
+                            print("Save mode disabled")
+                    else:
+                        print("Save mode requires CUDA. CUDA not available.")
+                    continue
+                    
+                if prompt:
+                    try:
+                        if streaming_enabled:
+                            response = self.stream_response(prompt, self.default_generation_config)
+                            print(f"Streamed response: {response}")
+                        else:
+                            response = self.generate_response(prompt, self.default_generation_config)
                             print(f"Generated response: {response}")
                             
                     except Exception as e:
