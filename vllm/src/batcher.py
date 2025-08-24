@@ -78,8 +78,16 @@ class RequestBatcher:
             with torch.no_grad():
                 outputs = self.model(inputs_tensor)
             
-            # Return the processed outputs
-            return outputs
+            # Handle different output types from models
+            if hasattr(outputs, 'logits'):
+                # For models that return CausalLMOutputWithPast or similar
+                return outputs.logits
+            elif isinstance(outputs, torch.Tensor):
+                # For models that return raw tensors
+                return outputs
+            else:
+                # For other output types, return as-is
+                return outputs
             
         except Exception as e:
             print(f"Error processing batch: {str(e)}")

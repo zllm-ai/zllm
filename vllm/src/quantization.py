@@ -37,8 +37,8 @@ class Quantizer:
         print("Applying GPTQ quantization...")
         print("Note: This is a simplified implementation. A full GPTQ implementation would be more complex.")
         
-        # Check if we should use float16 (only if CUDA is available)
-        target_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        # Check if we should use float16 (only if CUDA is available and not running on CPU)
+        target_dtype = torch.float16 if (torch.cuda.is_available() and self.device.type != "cpu") else torch.float32
         
         # Simulate weight quantization by converting to lower precision
         for name, module in self.model.named_modules():
@@ -55,8 +55,8 @@ class Quantizer:
         print("Applying AWQ quantization...")
         print("Note: This is a simplified implementation. A full AWQ implementation would be more complex.")
         
-        # Check if we should use float16 (only if CUDA is available)
-        target_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        # Check if we should use float16 (only if CUDA is available and not running on CPU)
+        target_dtype = torch.float16 if (torch.cuda.is_available() and self.device.type != "cpu") else torch.float32
         
         # Simulate weight quantization by converting to lower precision
         for name, module in self.model.named_modules():

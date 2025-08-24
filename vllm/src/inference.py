@@ -12,8 +12,14 @@ import numpy as np
 
 class InferenceEngine:
     def __init__(self, device: str = "cuda"):
-        self.device = torch.device(device if torch.cuda.is_available() else "cpu")
-        self.use_cuda_graph = torch.cuda.is_available() and device == "cuda"
+        # Handle device properly for CPU vs CUDA
+        if device == "cpu" or not torch.cuda.is_available():
+            self.device = torch.device("cpu")
+            self.use_cuda_graph = False
+        else:
+            self.device = torch.device("cuda")
+            self.use_cuda_graph = True
+            
         self.cuda_graph = None
         self.static_input = None
         self.static_output = None

@@ -40,8 +40,8 @@ def main():
     print(f"Device: {device_choice}")
     
     try:
-        # Initialize model loader
-        model_loader = HuggingFaceModelLoader(model_name=model_name, quantization=quantization_type)
+        # Initialize model loader with device parameter
+        model_loader = HuggingFaceModelLoader(model_name=model_name, quantization=quantization_type, device=device_choice)
         
         # Get model and tokenizer
         model = model_loader.get_model()

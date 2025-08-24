@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: ultimate_vllm
+Version: 1.0.0
+Requires-Dist: torch
+Requires-Dist: transformers
+Requires-Dist: accelerate
+Requires-Dist: fastapi
+Requires-Dist: uvicorn
+Requires-Dist: pydantic
+Requires-Dist: pyyaml
+Dynamic: requires-dist

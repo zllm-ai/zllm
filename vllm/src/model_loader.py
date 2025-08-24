@@ -7,15 +7,16 @@ This module provides functionality to load models from Hugging Face using the tr
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import os
 import torch
+import warnings
 from accelerate import Accelerator
 
 class HuggingFaceModelLoader:
-    def __init__(self, model_name: str, quantization: str = None):
+    def __init__(self, model_name: str, quantization: str = None, device: str = "cuda"):
         self.model_name = model_name
         self.quantization = quantization
         self.tokenizer = None
         self.model = None
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = device if device else ("cuda" if torch.cuda.is_available() else "cpu")
         self.accelerator = Accelerator()
         self.init_model()
     
@@ -33,15 +34,30 @@ class HuggingFaceModelLoader:
             # Load model with appropriate settings
             load_kwargs = {}
             
-            # Only use float16 if CUDA is available
-            if torch.cuda.is_available():
-                load_kwargs["torch_dtype"] = torch.float16
-                load_kwargs["device_map"] = "auto"
-            
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.model_name,
-                **load_kwargs
-            )
+            # Suppress kernel version warning
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                
+                # For CPU execution, we need to be more careful with dtype and device placement
+                if self.device == "cpu":
+                    # Load model on CPU without device_map
+                    self.model = AutoModelForCausalLM.from_pretrained(
+                        self.model_name,
+                        low_cpu_mem_usage=True,
+                        torch_dtype=torch.float32  # Use float32 for CPU
+                    )
+                    # Move model to CPU explicitly
+                    self.model = self.model.to(torch.device("cpu"))
+                else:
+                    # For CUDA, use the optimized settings
+                    if torch.cuda.is_available():
+                        load_kwargs["torch_dtype"] = torch.float16
+                        load_kwargs["device_map"] = "auto"
+                    
+                    self.model = AutoModelForCausalLM.from_pretrained(
+                        self.model_name,
+                        **load_kwargs
+                    )
             
             print("Model loaded successfully!")
             
@@ -50,6 +66,8 @@ class HuggingFaceModelLoader:
                 self.apply_quantization()
         except Exception as e:
             print(f"Error loading model: {str(e)}")
+            import traceback
+            traceback.print_exc()
             # Try with minimal settings
             try:
                 print("Trying fallback loading method...")
@@ -57,6 +75,8 @@ class HuggingFaceModelLoader:
                     self.model_name,
                     low_cpu_mem_usage=True
                 )
+                if self.device == "cpu":
+                    self.model = self.model.to(torch.device("cpu"))
             except Exception as e2:
                 print(f"Fallback method also failed: {str(e2)}")
                 raise e
