@@ -85,6 +85,9 @@ class RequestBatcher:
             elif isinstance(outputs, torch.Tensor):
                 # For models that return raw tensors
                 return outputs
+            elif hasattr(outputs, 'last_hidden_state'):
+                # For models that return BaseModelOutput or similar
+                return outputs.last_hidden_state
             else:
                 # For other output types, return as-is
                 return outputs

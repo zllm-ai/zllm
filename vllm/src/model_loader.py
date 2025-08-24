@@ -31,25 +31,37 @@ class HuggingFaceModelLoader:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
             
             print(f"Loading model for {self.model_name}...")
-            # Load model with appropriate settings
-            load_kwargs = {}
             
-            # Suppress kernel version warning
+            # Suppress kernel version warning and other warnings
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 
-                # For CPU execution, we need to be more careful with dtype and device placement
-                if self.device == "cpu":
-                    # Load model on CPU without device_map
+                # Special handling for quantized models on CPU
+                if self.device == "cpu" and self.quantization in ["awq", "AWQ", "gptq", "GPTQ"]:
+                    print(f"Warning: {self.quantization.upper()} quantized models are optimized for GPU.")
+                    print("Loading with reduced precision settings for CPU compatibility...")
+                    
+                    # Load model on CPU with specific settings for quantized models
                     self.model = AutoModelForCausalLM.from_pretrained(
                         self.model_name,
                         low_cpu_mem_usage=True,
-                        torch_dtype=torch.float32  # Use float32 for CPU
+                        torch_dtype=torch.float32,
+                        trust_remote_code=True  # Some quantized models need this
+                    )
+                    # Move model to CPU explicitly
+                    self.model = self.model.to(torch.device("cpu"))
+                elif self.device == "cpu":
+                    # Standard CPU loading
+                    self.model = AutoModelForCausalLM.from_pretrained(
+                        self.model_name,
+                        low_cpu_mem_usage=True,
+                        torch_dtype=torch.float32
                     )
                     # Move model to CPU explicitly
                     self.model = self.model.to(torch.device("cpu"))
                 else:
                     # For CUDA, use the optimized settings
+                    load_kwargs = {}
                     if torch.cuda.is_available():
                         load_kwargs["torch_dtype"] = torch.float16
                         load_kwargs["device_map"] = "auto"
@@ -62,7 +74,7 @@ class HuggingFaceModelLoader:
             print("Model loaded successfully!")
             
             # Apply quantization if specified
-            if self.quantization:
+            if self.quantization and self.quantization.lower() != "none":
                 self.apply_quantization()
         except Exception as e:
             print(f"Error loading model: {str(e)}")
@@ -73,7 +85,8 @@ class HuggingFaceModelLoader:
                 print("Trying fallback loading method...")
                 self.model = AutoModelForCausalLM.from_pretrained(
                     self.model_name,
-                    low_cpu_mem_usage=True
+                    low_cpu_mem_usage=True,
+                    trust_remote_code=True
                 )
                 if self.device == "cpu":
                     self.model = self.model.to(torch.device("cpu"))
@@ -83,15 +96,17 @@ class HuggingFaceModelLoader:
     
     def apply_quantization(self):
         """Apply quantization techniques to the model"""
-        print(f"Applying {self.quantization.upper()} quantization...")
+        quant_type = self.quantization.lower() if self.quantization else "none"
+        print(f"Applying {quant_type.upper()} quantization...")
+        
         # Note: In a full implementation, this would contain actual quantization code
         # For now, we're just printing a message
-        if self.quantization == "gptq":
+        if quant_type == "gptq":
             print("GPTQ quantization would be applied here")
-        elif self.quantization == "awq":
+        elif quant_type == "awq":
             print("AWQ quantization would be applied here")
         else:
-            print(f"Unknown quantization method: {self.quantization}")
+            print(f"Unknown quantization method: {quant_type}")
     
     def save_model(self, save_path: str):
         """Save the loaded model to a local directory"""

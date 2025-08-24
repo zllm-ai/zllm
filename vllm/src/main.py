@@ -3,6 +3,7 @@ Main entry point for the custom vLLM/llama.cpp CLI application
 """
 
 import torch
+import warnings
 from torch.nn import functional as F
 from typing import List, Tuple, Dict
 from vllm.src.model_loader import HuggingFaceModelLoader
@@ -15,10 +16,13 @@ def main():
     print("Custom vLLM Implementation")
     print("=" * 30)
     
+    # Suppress warnings
+    warnings.filterwarnings("ignore")
+    
     # Prompt for model name
-    model_name = input("Enter Hugging Face model name (e.g., meta-llama/Llama-3-8b): ").strip()
+    model_name = input("Enter Hugging Face model name (e.g., gpt2, Qwen/Qwen3-0.5B): ").strip()
     if not model_name:
-        model_name = "meta-llama/Llama-3-8b"  # Default model
+        model_name = "gpt2"  # Default to a small model that works on CPU
     
     # Prompt for quantization type
     quantization_type = input("Choose quantization type (gptq/awq/none) [default: none]: ").strip()
@@ -39,9 +43,20 @@ def main():
     print(f"Quantization: {quantization_type}")
     print(f"Device: {device_choice}")
     
+    # Special handling for AWQ models on CPU
+    if quantization_type in ["awq", "AWQ"] and device_choice == "cpu":
+        print("Warning: AWQ models are optimized for GPU. Performance on CPU may be poor.")
+        print("Consider using a non-quantized model for better CPU performance.")
+        choice = input("Continue anyway? (y/n) [default: n]: ").strip().lower()
+        if choice != 'y':
+            print("Exiting...")
+            return
+    
     try:
-        # Initialize model loader with device parameter
-        model_loader = HuggingFaceModelLoader(model_name=model_name, quantization=quantization_type, device=device_choice)
+        # Initialize model loader with warnings suppressed
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model_loader = HuggingFaceModelLoader(model_name=model_name, quantization=quantization_type, device=device_choice)
         
         # Get model and tokenizer
         model = model_loader.get_model()
@@ -57,7 +72,7 @@ def main():
         inference_engine = InferenceEngine(device=device_choice)
         
         # Initialize request batcher
-        batcher = RequestBatcher(model=model, max_seq_len=2048, batch_size=8)
+        batcher = RequestBatcher(model=model, max_seq_len=512, batch_size=4)  # Smaller defaults for CPU
         batcher.tokenizer = tokenizer
         
         print("Model loaded successfully!")
@@ -81,6 +96,18 @@ def main():
                         # For simplicity, we're just showing tensor shapes
                         print(f"Output shape: {outputs.shape}")
                         print("Inference completed successfully!")
+                        
+                        # Try to generate some text
+                        try:
+                            with torch.no_grad():
+                                # Take the last token's logits and sample
+                                logits = outputs[0, -1, :]
+                                probabilities = torch.softmax(logits, dim=-1)
+                                predicted_token_id = torch.multinomial(probabilities, 1).item()
+                                predicted_token = tokenizer.decode([predicted_token_id])
+                                print(f"Predicted next token: '{predicted_token}'")
+                        except Exception as e:
+                            print(f"Could not generate text: {str(e)}")
                     else:
                         print("No output generated")
                         
@@ -88,9 +115,13 @@ def main():
                     batcher.inputs = []
                 except Exception as e:
                     print(f"Error processing request: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
     
     except Exception as e:
         print(f"Error loading model: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return
 
 
