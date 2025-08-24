@@ -4,6 +4,7 @@ Main entry point for the custom vLLM/llama.cpp CLI application
 
 import torch
 import warnings
+import sys
 from typing import List, Tuple, Dict, Optional
 from vllm.src.model_loader import HuggingFaceModelLoader
 from vllm.src.quantization import Quantizer
@@ -48,7 +49,7 @@ class CustomVLLMCLI:
         max_context_length = self.get_model_max_tokens()
         
         defaults = {
-            "max_new_tokens": min(500, max_context_length // 4),  # Use 1/4 of context or 500, whichever is smaller
+            "max_new_tokens": min(300, max_context_length // 4),  # Use 1/4 of context or 300, whichever is smaller
             "temperature": 0.7,
             "top_p": 0.9,
             "top_k": 50,
@@ -83,7 +84,6 @@ class CustomVLLMCLI:
             return False
             
         try:
-            # Move model to GPU but keep KV cache operations on CPU
             print("Enabling Save Mode...")
             print("Moving model weights to GPU, keeping KV cache operations on CPU...")
             
@@ -197,7 +197,7 @@ class CustomVLLMCLI:
                 context_length = 128
             config['context_length'] = context_length
         
-        max_suggested_new_tokens = min(1000, config.get('context_length', 2048) // 4)
+        max_suggested_new_tokens = min(500, config.get('context_length', 2048) // 4)
         print(f"Model suggested max new tokens: {max_suggested_new_tokens}")
         max_new_tokens_input = input(f"Max new tokens [default: {max_suggested_new_tokens}]: ").strip()
         if max_new_tokens_input:
@@ -277,15 +277,19 @@ class CustomVLLMCLI:
             )
             inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
             
-            print("Generating response (streaming): ", end="", flush=True)
+            print("Generating response: ", end="", flush=True)
             
             # Suppress transformer warnings
             import transformers
             transformers.logging.set_verbosity_error()
             
-            # Prepare generation parameters for streaming
+            # For proper streaming, we need to generate token by token
+            # Create initial input
+            current_inputs = {k: v.clone() for k, v in inputs.items()}
+            generated_text = ""
+            
+            # Prepare generation parameters
             gen_kwargs = {
-                "max_new_tokens": config['max_new_tokens'],
                 "temperature": config['temperature'],
                 "top_p": config['top_p'],
                 "repetition_penalty": config['repetition_penalty'],
@@ -299,43 +303,44 @@ class CustomVLLMCLI:
             if config.get('top_k', 0) > 0:
                 gen_kwargs["top_k"] = config['top_k']
             
-            # Generate response with streaming
+            # Generate tokens one by one for true streaming
+            max_tokens = config['max_new_tokens']
+            
             with torch.no_grad():
-                # For streaming, we'll generate token by token
-                generated_tokens = []
-                input_length = inputs[list(inputs.keys())[0]].shape[1]
-                
-                # Create initial input
-                current_inputs = {k: v.clone() for k, v in inputs.items()}
-                
-                for i in range(config['max_new_tokens']):
-                    # Generate next token
+                for i in range(max_tokens):
+                    # Generate next token with only 1 new token
                     outputs = self.model.generate(
                         **current_inputs,
                         max_new_tokens=1,
                         **{k: v for k, v in gen_kwargs.items() if k not in ['max_new_tokens']}
                     )
                     
-                    # Get the new token
+                    # Get the new token ID
                     new_token_id = outputs[0, -1].unsqueeze(0).unsqueeze(0)
+                    
+                    # Decode the new token
                     new_token = self.tokenizer.decode([new_token_id.item()])
                     
-                    # Check for EOS token
+                    # Check for end of sequence
                     if new_token_id.item() == self.tokenizer.eos_token_id:
                         break
                     
-                    # Print the new token
+                    # Print the new token immediately
                     print(new_token, end="", flush=True)
-                    generated_tokens.append(new_token_id.item())
+                    generated_text += new_token
                     
                     # Update inputs for next iteration
                     current_inputs = {
                         k: torch.cat([v, new_token_id.to(v.device)], dim=1) 
                         for k, v in current_inputs.items()
                     }
-                
-                print()  # New line after streaming
-                return ''.join([self.tokenizer.decode([token_id]) for token_id in generated_tokens])
+                    
+                    # Small delay for better streaming experience
+                    import time
+                    time.sleep(0.02)
+            
+            print()  # New line after streaming
+            return generated_text
             
         except Exception as e:
             raise Exception(f"Error generating response: {str(e)}")
@@ -428,49 +433,56 @@ class CustomVLLMCLI:
         # Interactive session
         streaming_enabled = False
         while True:
-            prompt = input("\nEnter your prompt (or 'quit' to exit, 'config' to reconfigure, 'stream' to toggle streaming, 'save' to toggle save mode): ").strip()
-            if prompt.lower() in ['quit', 'exit']:
+            try:
+                prompt = input("\nEnter your prompt (or 'quit' to exit, 'config' to reconfigure, 'stream' to toggle streaming, 'save' to toggle save mode): ").strip()
+                if prompt.lower() in ['quit', 'exit']:
+                    break
+                elif prompt.lower() == 'config':
+                    print("\nConfiguration Options:")
+                    print("1. Automatic (Use model defaults)")
+                    print("2. Manual (Customize parameters)")
+                    
+                    config_choice = input("Select configuration mode (1/2) [default: 1]: ").strip()
+                    
+                    if config_choice == "2":
+                        config = self.manual_configure_generation_params()
+                    else:
+                        config = self.auto_configure_generation_params()
+                    self.show_current_config(config)
+                    continue
+                elif prompt.lower() == 'stream':
+                    streaming_enabled = not streaming_enabled
+                    print(f"Streaming mode {'enabled' if streaming_enabled else 'disabled'}")
+                    continue
+                elif prompt.lower() == 'save':
+                    if torch.cuda.is_available():
+                        self.save_mode_enabled = not self.save_mode_enabled
+                        if self.save_mode_enabled:
+                            self.enable_save_mode()
+                        else:
+                            print("Save mode disabled")
+                    else:
+                        print("Save mode requires CUDA. CUDA not available.")
+                    continue
+                    
+                if prompt:
+                    try:
+                        if streaming_enabled:
+                            response = self.stream_response(prompt, config)
+                            print(f"\nStreamed response completed.")
+                        else:
+                            response = self.generate_response(prompt, config)
+                            print(f"Generated response: {response}")
+                            
+                    except Exception as e:
+                        print(f"Error processing request: {str(e)}")
+                        print("Try a shorter prompt, reduce max_new_tokens, or use a different model.")
+            except KeyboardInterrupt:
+                print("\n\nInterrupted by user. Exiting...")
                 break
-            elif prompt.lower() == 'config':
-                print("\nConfiguration Options:")
-                print("1. Automatic (Use model defaults)")
-                print("2. Manual (Customize parameters)")
-                
-                config_choice = input("Select configuration mode (1/2) [default: 1]: ").strip()
-                
-                if config_choice == "2":
-                    config = self.manual_configure_generation_params()
-                else:
-                    config = self.auto_configure_generation_params()
-                self.show_current_config(config)
-                continue
-            elif prompt.lower() == 'stream':
-                streaming_enabled = not streaming_enabled
-                print(f"Streaming mode {'enabled' if streaming_enabled else 'disabled'}")
-                continue
-            elif prompt.lower() == 'save':
-                if torch.cuda.is_available():
-                    self.save_mode_enabled = not self.save_mode_enabled
-                    if self.save_mode_enabled:
-                        self.enable_save_mode()
-                    else:
-                        print("Save mode disabled")
-                else:
-                    print("Save mode requires CUDA. CUDA not available.")
-                continue
-                
-            if prompt:
-                try:
-                    if streaming_enabled:
-                        response = self.stream_response(prompt, config)
-                        print(f"Streamed response: {response}")
-                    else:
-                        response = self.generate_response(prompt, config)
-                        print(f"Generated response: {response}")
-                        
-                except Exception as e:
-                    print(f"Error processing request: {str(e)}")
-                    print("Try a shorter prompt, reduce max_new_tokens, or use a different model.")
+            except EOFError:
+                print("\n\nEnd of input. Exiting...")
+                break
     
     def run_with_defaults(self):
         """Run with default configuration for quick start"""
@@ -504,35 +516,42 @@ class CustomVLLMCLI:
             # Interactive session with defaults
             streaming_enabled = False
             while True:
-                prompt = input("\nEnter your prompt (or 'quit' to exit, 'stream' to toggle streaming, 'save' to toggle save mode): ").strip()
-                if prompt.lower() in ['quit', 'exit']:
+                try:
+                    prompt = input("\nEnter your prompt (or 'quit' to exit, 'stream' to toggle streaming, 'save' to toggle save mode): ").strip()
+                    if prompt.lower() in ['quit', 'exit']:
+                        break
+                    elif prompt.lower() == 'stream':
+                        streaming_enabled = not streaming_enabled
+                        print(f"Streaming mode {'enabled' if streaming_enabled else 'disabled'}")
+                        continue
+                    elif prompt.lower() == 'save':
+                        if torch.cuda.is_available():
+                            self.save_mode_enabled = not self.save_mode_enabled
+                            if self.save_mode_enabled:
+                                self.enable_save_mode()
+                            else:
+                                print("Save mode disabled")
+                        else:
+                            print("Save mode requires CUDA. CUDA not available.")
+                        continue
+                        
+                    if prompt:
+                        try:
+                            if streaming_enabled:
+                                response = self.stream_response(prompt, self.default_generation_config)
+                                print(f"\nStreamed response completed.")
+                            else:
+                                response = self.generate_response(prompt, self.default_generation_config)
+                                print(f"Generated response: {response}")
+                                
+                        except Exception as e:
+                            print(f"Error processing request: {str(e)}")
+                except KeyboardInterrupt:
+                    print("\n\nInterrupted by user. Exiting...")
                     break
-                elif prompt.lower() == 'stream':
-                    streaming_enabled = not streaming_enabled
-                    print(f"Streaming mode {'enabled' if streaming_enabled else 'disabled'}")
-                    continue
-                elif prompt.lower() == 'save':
-                    if torch.cuda.is_available():
-                        self.save_mode_enabled = not self.save_mode_enabled
-                        if self.save_mode_enabled:
-                            self.enable_save_mode()
-                        else:
-                            print("Save mode disabled")
-                    else:
-                        print("Save mode requires CUDA. CUDA not available.")
-                    continue
-                    
-                if prompt:
-                    try:
-                        if streaming_enabled:
-                            response = self.stream_response(prompt, self.default_generation_config)
-                            print(f"Streamed response: {response}")
-                        else:
-                            response = self.generate_response(prompt, self.default_generation_config)
-                            print(f"Generated response: {response}")
-                            
-                    except Exception as e:
-                        print(f"Error processing request: {str(e)}")
+                except EOFError:
+                    print("\n\nEnd of input. Exiting...")
+                    break
         
         except Exception as e:
             print(f"Error: {str(e)}")
@@ -547,12 +566,17 @@ def main():
     print("1. Smart Setup (Automatic configuration with customization option)")
     print("2. Quick Start (Default settings)")
     
-    choice = input("Select mode (1/2) [default: 1]: ").strip()
-    
-    if choice == "2":
-        cli.run_with_defaults()
-    else:
-        cli.run_interactive_session()
+    try:
+        choice = input("Select mode (1/2) [default: 1]: ").strip()
+        
+        if choice == "2":
+            cli.run_with_defaults()
+        else:
+            cli.run_interactive_session()
+    except KeyboardInterrupt:
+        print("\n\nInterrupted by user. Exiting...")
+    except EOFError:
+        print("\n\nEnd of input. Exiting...")
 
 
 if __name__ == "__main__":
