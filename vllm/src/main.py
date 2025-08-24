@@ -85,34 +85,26 @@ def main():
                 
             if user_input:
                 try:
-                    # Add request to batcher
-                    batcher.add_request(user_input)
+                    # For better text generation, we'll use the model's generate method directly
+                    # Tokenize the input
+                    inputs = tokenizer(user_input, return_tensors="pt", padding=True, truncation=True, max_length=512)
+                    inputs = {k: v.to(model.device) for k, v in inputs.items()}
                     
-                    # Process the batch
-                    outputs = batcher.finalize_batch()
+                    # Generate response
+                    with torch.no_grad():
+                        outputs = model.generate(
+                            **inputs,
+                            max_new_tokens=100,
+                            do_sample=True,
+                            temperature=0.7,
+                            top_p=0.9,
+                            pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id
+                        )
                     
-                    # Decode output
-                    if outputs is not None:
-                        # For simplicity, we're just showing tensor shapes
-                        print(f"Output shape: {outputs.shape}")
-                        print("Inference completed successfully!")
+                    # Decode and print the response
+                    response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+                    print(f"Generated response: {response}")
                         
-                        # Try to generate some text
-                        try:
-                            with torch.no_grad():
-                                # Take the last token's logits and sample
-                                logits = outputs[0, -1, :]
-                                probabilities = torch.softmax(logits, dim=-1)
-                                predicted_token_id = torch.multinomial(probabilities, 1).item()
-                                predicted_token = tokenizer.decode([predicted_token_id])
-                                print(f"Predicted next token: '{predicted_token}'")
-                        except Exception as e:
-                            print(f"Could not generate text: {str(e)}")
-                    else:
-                        print("No output generated")
-                        
-                    # Clear the batch for next request
-                    batcher.inputs = []
                 except Exception as e:
                     print(f"Error processing request: {str(e)}")
                     import traceback
