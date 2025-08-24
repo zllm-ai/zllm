@@ -1,0 +1,16 @@
+# Custom vLLM/llama.cpp Project Structure
+
+vllm/
+├── models/              # Stored models (Hugging Face, local, etc.)
+├── src/                # Source code
+│   ├── main.py         # Entry point
+│   ├── server.py       # API server
+│   ├── inference.py    # Inference logic
+│   ├── batcher.py      # Request batching
+│   ├── quantization.py # Quantization support (GPTQ, AWQ)
+│   └── utils.py        # Helper functions
+├── config/             # Configuration files
+│   └── settings.json   # Project settings
+├── requirements.txt    # Dependencies
+├── Dockerfile          # Docker setup (optional)
+└── README.md           # Project documentation
